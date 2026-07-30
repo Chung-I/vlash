@@ -9,7 +9,7 @@ DATASET_REPO_ID = "HuggingFaceVLA/libero"  # fallback: physical-intelligence/lib
 
 IMAGE_KEYS = {
     "image": "observation.images.image",
-    "wrist_image": "observation.images.wrist_image",
+    "wrist_image": "observation.images.image2",
 }
 
 STATE_DIM = 8   # eef_pos(3) + eef axis-angle(3) + gripper_qpos(2)
