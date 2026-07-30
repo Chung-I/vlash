@@ -97,6 +97,17 @@ def main():
     from libero.libero import get_libero_path
     from libero.libero.envs import OffScreenRenderEnv
 
+    import torch
+    _orig_torch_load = torch.load
+
+    def _load_full(*args, **kwargs):
+        kwargs.setdefault("weights_only", False)
+        return _orig_torch_load(*args, **kwargs)
+
+    # LIBERO's task init states are pickled package data (trusted, ships with
+    # the libero package); torch>=2.6 defaults weights_only=True and rejects them.
+    torch.load = _load_full
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--suite", required=True, choices=list(SUITES))
     parser.add_argument("--delay", type=int, required=True)
