@@ -125,8 +125,18 @@ def main():
         task_str = task.language
         init_states = suite.get_task_init_states(task_id)
         bddl = pathlib.Path(get_libero_path("bddl_files")) / task.problem_folder / task.bddl_file
+        # Benchmark-SAFE OffScreenRenderEnv kwargs: hard_reset=True rebuilds
+        # the sim on every reset (avoids a corrupt-context re-reset path that
+        # SIGABRTs under EGL on the second+ episode); explicit camera_names
+        # and render_gpu_device_id pin the offscreen rendering pipeline.
         env = OffScreenRenderEnv(
-            bddl_file_name=str(bddl), camera_heights=256, camera_widths=256
+            bddl_file_name=str(bddl),
+            camera_heights=256,
+            camera_widths=256,
+            camera_names=["agentview", "robot0_eye_in_hand"],
+            control_freq=20,
+            hard_reset=True,
+            render_gpu_device_id=0,
         )
         env.seed(0)
         successes = 0
