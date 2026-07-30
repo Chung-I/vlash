@@ -27,3 +27,6 @@ MANIFEST
 /.deps/
 
 outputs/
+
+# Superpowers planner
+.superpowers/
