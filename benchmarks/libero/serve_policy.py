@@ -15,15 +15,17 @@ import logging
 import numpy as np
 import torch
 from flask import Flask, request
+from lerobot.configs.policies import PreTrainedConfig
 
 from benchmarks.libero.libero_config import IMAGE_KEYS, K, SERVER_PORT
 from vlash.policies.factory import get_policy_class
 
 
 def load_policy(checkpoint: str):
+    cfg = PreTrainedConfig.from_pretrained(checkpoint)
+    cfg.compile_model = False
     policy_cls = get_policy_class("pi05")
-    policy = policy_cls.from_pretrained(pretrained_name_or_path=checkpoint)
-    policy.config.compile_model = False
+    policy = policy_cls.from_pretrained(pretrained_name_or_path=checkpoint, config=cfg)
     return policy.to(policy.config.device).eval()
 
 
@@ -51,7 +53,7 @@ def make_app(policy) -> Flask:
         batch["task"] = [str(data["task"])]
         with torch.inference_mode():
             chunk = policy.predict_action_chunk(batch)
-        actions = chunk[0, :K].float().cpu().numpy().astype(np.float32)
+        actions = chunk[0, :K].float().cpu().numpy()
         buf = io.BytesIO()
         np.savez(buf, actions=actions)
         return buf.getvalue()
