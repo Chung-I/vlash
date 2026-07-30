@@ -5,7 +5,7 @@
 #SBATCH --gres=gpu:4
 #SBATCH --cpus-per-task=48
 #SBATCH --mem=800G
-#SBATCH --time=12:00:00
+#SBATCH --time=24:00:00
 #SBATCH --output=/work/roboleon1295/vlash-eval/train-%j.log
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=leon129506@gmail.com
@@ -27,7 +27,7 @@ srun vlash train examples/train/pi05/async.yaml HuggingFaceVLA/libero \
   --batch_size=8 \
   --max_delay_steps=3 \
   --use_state_ground_truth=true \
-  --num_workers=8 \
+  --num_workers=10 \
   --save_freq=10000 \
   --scheduler.num_decay_steps=30000 \
   --wandb.project=vlash-libero
