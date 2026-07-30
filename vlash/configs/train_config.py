@@ -102,5 +102,10 @@ class VLASHTrainConfig(TrainPipelineConfig):
     # masks to prevent cross-offset attention.
     shared_observation: bool = False
 
+    # Use recorded future state s_{t+offset} for the async-offset condition
+    # instead of the previous-action proxy. REQUIRED when state_dim != action_dim
+    # (e.g. LIBERO: 8-dim state, 7-dim OSC-delta action).
+    use_state_ground_truth: bool = False
+
     # LoRA configuration
     lora: LoRAConfig = field(default_factory=LoRAConfig)
