@@ -40,10 +40,20 @@ from libero_config import (  # noqa: E402
     SUITES,
 )
 
-# Per-episode drain timeout: generous for a 520-step episode at server
-# round-trip latency. A get() times out every POLL_S seconds so a dead
-# worker is detected quickly instead of waiting the full window.
+# Stall-detection timeout: a worker that produces NO message (heartbeat, ep,
+# or done) for this long is presumed dead/stuck and gets killed+respawned.
+# This must NOT be sized off a single episode's total duration: libero_10
+# has 520-step episodes and, at observed server round-trip latency
+# (~19-20s per k=5 chunk => ~104 chunks/episode), a single episode can
+# legitimately take 30+ minutes. Killing on episode-completion alone (no
+# heartbeat) would keep restarting a perfectly healthy worker before it
+# ever finishes ep 0 -- observed in practice: 3/3 libero_10 shards hit
+# "WORKER DIED ... respawning" repeatedly while the policy server log
+# showed continuous, healthy /predict traffic the whole time. Heartbeats
+# every HEARTBEAT_EVERY_N_STEPS steps keep this timeout meaningful as a
+# true liveness check regardless of episode length.
 EPISODE_TIMEOUT_S = 15 * 60
+HEARTBEAT_EVERY_N_STEPS = 20
 POLL_S = 5
 # Respawns are shared across the whole shard (all tasks), not per task:
 # effectively unlimited but bounded so a truly wedged shard still exits.
@@ -94,7 +104,15 @@ class RemotePolicy:
         return np.load(io.BytesIO(resp.content))["actions"]
 
 
-def run_episode(env, init_state, task_str: str, delay: int, max_steps: int, port: int) -> bool:
+def run_episode(
+    env, init_state, task_str: str, delay: int, max_steps: int, port: int, heartbeat=None
+) -> bool:
+    """Run one episode. If given, heartbeat(step) is called periodically so a
+    caller polling from another process can tell "slow but alive" from
+    "actually dead" without waiting for the whole (potentially long) episode
+    to finish -- libero_10 episodes take ~500+ steps and, at observed
+    per-chunk server latency, can take on the order of 30+ minutes.
+    """
     env.reset()
     obs = env.set_init_state(init_state)
     for _ in range(SETTLE_STEPS):
@@ -103,11 +121,13 @@ def run_episode(env, init_state, task_str: str, delay: int, max_steps: int, port
     policy = RemotePolicy(port, task_str)
     executor = DelayedChunkExecutor(policy, k=K, delay=delay)
 
-    for _ in range(max_steps):
+    for step in range(max_steps):
         arrays = libero_obs_to_arrays(obs)
         images = {"image": arrays["image"], "wrist_image": arrays["wrist_image"]}
         action = executor.act(images, arrays["state"], task_str)
         obs, _, done, _ = env.step(action.tolist())
+        if heartbeat is not None and step % HEARTBEAT_EVERY_N_STEPS == 0:
+            heartbeat(step)
         if done:
             return True
     return False
@@ -185,11 +205,14 @@ def _run_task_worker(
 
     Executed in a spawned child process: imports LIBERO itself (spawn gives
     a clean interpreter/EGL/MuJoCo state per attempt) and creates the env
-    once for the whole run of episodes. Puts ("ep", ep_idx, success_bool) on
-    result_queue after each completed episode, then ("done",) once the
-    range is exhausted. If the process is killed (native abort) mid-episode,
-    it simply stops producing messages; the parent detects that via
-    process-liveness / queue-timeout and respawns from the next episode.
+    once for the whole run of episodes. Puts ("heartbeat", ep_idx, step)
+    on result_queue periodically while an episode is in progress (so the
+    parent can tell a slow-but-alive episode from a dead one without
+    waiting for the whole episode), ("ep", ep_idx, success_bool) after
+    each completed episode, then ("done",) once the range is exhausted.
+    If the process is killed (native abort) mid-episode, it simply stops
+    producing messages; the parent detects that via process-liveness /
+    queue-timeout and respawns from the next episode.
     """
     from libero.libero.envs import OffScreenRenderEnv
 
@@ -218,7 +241,12 @@ def _run_task_worker(
     env.seed(0)
     try:
         for ep in range(start_ep, num_trials):
-            ok = run_episode(env, init_states[ep], task_str, delay, max_steps, port)
+            def _heartbeat(step, _ep=ep):
+                result_queue.put(("heartbeat", _ep, step))
+
+            ok = run_episode(
+                env, init_states[ep], task_str, delay, max_steps, port, heartbeat=_heartbeat
+            )
             result_queue.put(("ep", ep, bool(ok)))
         result_queue.put(("done",))
     finally:
@@ -331,6 +359,13 @@ def main():
                 elif msg[0] == "done":
                     finished = True
                     break
+                elif msg[0] == "heartbeat":
+                    _, hb_ep, hb_step = msg
+                    print(
+                        f"[{args.suite} d={args.delay}] task {task_id} ({task_str[:40]}) "
+                        f"heartbeat: ep {hb_ep} step {hb_step}",
+                        flush=True,
+                    )
 
             if proc.is_alive():
                 proc.terminate()
