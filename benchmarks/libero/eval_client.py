@@ -11,6 +11,7 @@ import argparse
 import io
 import json
 import math
+import os
 import pathlib
 import sys
 
@@ -118,11 +119,40 @@ def main():
 
     suite = libero_benchmark.get_benchmark_dict()[args.suite]()
     max_steps = SUITES[args.suite]
+
+    out_path = pathlib.Path(args.out)
     results = {}
+    if out_path.exists():
+        try:
+            prev = json.loads(out_path.read_text())
+            results = prev.get("per_task", {})
+        except (json.JSONDecodeError, OSError):
+            results = {}
+
+    def write_results():
+        total_s = sum(r["successes"] for r in results.values())
+        total_t = sum(r["trials"] for r in results.values())
+        out = {
+            "suite": args.suite,
+            "delay": args.delay,
+            "per_task": results,
+            "success_rate": (total_s / total_t) if total_t else 0.0,
+        }
+        tmp_path = pathlib.Path(str(out_path) + ".tmp")
+        tmp_path.write_text(json.dumps(out, indent=2))
+        os.replace(tmp_path, out_path)
+        return out
 
     for task_id in range(suite.n_tasks):
         task = suite.get_task(task_id)
         task_str = task.language
+        if task.name in results:
+            print(
+                f"[{args.suite} d={args.delay}] task {task_id} ({task_str[:40]}) "
+                "SKIP (already done, resuming)",
+                flush=True,
+            )
+            continue
         init_states = suite.get_task_init_states(task_id)
         bddl = pathlib.Path(get_libero_path("bddl_files")) / task.problem_folder / task.bddl_file
         # Benchmark-SAFE OffScreenRenderEnv kwargs: hard_reset=True rebuilds
@@ -152,16 +182,9 @@ def main():
             )
         env.close()
         results[task.name] = {"successes": successes, "trials": args.num_trials}
+        write_results()
 
-    total_s = sum(r["successes"] for r in results.values())
-    total_t = sum(r["trials"] for r in results.values())
-    out = {
-        "suite": args.suite,
-        "delay": args.delay,
-        "per_task": results,
-        "success_rate": total_s / total_t,
-    }
-    pathlib.Path(args.out).write_text(json.dumps(out, indent=2))
+    out = write_results()
     print("WROTE", args.out, "success_rate", out["success_rate"], flush=True)
 
 

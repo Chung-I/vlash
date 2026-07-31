@@ -35,7 +35,14 @@ until curl -s http://127.0.0.1:$PORT/health | grep -q ok; do
   sleep 5
 done
 
-MUJOCO_GL=egl /work/roboleon1295/.venv-libero-vanilla/bin/python \
-  benchmarks/libero/eval_client.py --suite $SUITE --delay $DELAY --port $PORT \
-  --out $OUT/${SUITE}_d${DELAY}.json
+for attempt in 1 2 3 4 5; do
+  MUJOCO_GL=egl /work/roboleon1295/.venv-libero-vanilla/bin/python \
+    benchmarks/libero/eval_client.py --suite $SUITE --delay $DELAY --port $PORT \
+    --out $OUT/${SUITE}_d${DELAY}.json
+  RC=$?
+  [ $RC -eq 0 ] && break
+  echo "CLIENT CRASHED (rc=$RC), retry $attempt"
+  sleep 10
+done
 kill $SERVER_PID
+[ $RC -ne 0 ] && exit 1
