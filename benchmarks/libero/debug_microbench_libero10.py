@@ -24,8 +24,24 @@ import pathlib
 DUMMY_ACTION = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0]
 
 
+def _patch_torch_load():
+    """Same patch eval_client.py applies: LIBERO's task init states are
+    pickled package data (trusted, ships with the libero package); torch>=2.6
+    defaults weights_only=True and rejects them."""
+    import torch
+
+    _orig_torch_load = torch.load
+
+    def _load_full(*args, **kwargs):
+        kwargs.setdefault("weights_only", False)
+        return _orig_torch_load(*args, **kwargs)
+
+    torch.load = _load_full
+
+
 def build_env(suite_name, task_id, camera_size, control_freq, hard_reset,
               set_render_gpu_id, render_gpu_device_id):
+    _patch_torch_load()
     from libero.libero import benchmark as libero_benchmark
     from libero.libero import get_libero_path
     from libero.libero.envs import OffScreenRenderEnv
