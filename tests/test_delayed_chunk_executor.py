@@ -58,3 +58,25 @@ def test_actions_come_from_current_chunk_in_order():
 def test_delay_must_be_less_than_k():
     with pytest.raises(AssertionError):
         DelayedChunkExecutor(RecordingPolicy(), k=5, delay=5)
+
+
+def test_delay1_stale_state_uses_stale_state_too():
+    policy = RecordingPolicy()
+    ex = DelayedChunkExecutor(policy, k=5, delay=1, stale_state=True)
+    run_steps(ex, 12)
+    # naive async: both images and state come from the T-1 snapshot
+    assert policy.calls == [(0, 0), (4, 4), (9, 9)]
+
+
+def test_delay3_stale_state_uses_stale_state_too():
+    policy = RecordingPolicy()
+    ex = DelayedChunkExecutor(policy, k=5, delay=3, stale_state=True)
+    run_steps(ex, 12)
+    assert policy.calls == [(0, 0), (2, 2), (7, 7)]
+
+
+def test_delay1_stale_state_false_keeps_fresh_state():
+    policy = RecordingPolicy()
+    ex = DelayedChunkExecutor(policy, k=5, delay=1, stale_state=False)
+    run_steps(ex, 12)
+    assert policy.calls == [(0, 0), (4, 5), (9, 10)]

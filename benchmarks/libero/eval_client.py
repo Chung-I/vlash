@@ -105,7 +105,14 @@ class RemotePolicy:
 
 
 def run_episode(
-    env, init_state, task_str: str, delay: int, max_steps: int, port: int, heartbeat=None
+    env,
+    init_state,
+    task_str: str,
+    delay: int,
+    max_steps: int,
+    port: int,
+    heartbeat=None,
+    stale_state: bool = False,
 ) -> bool:
     """Run one episode. If given, heartbeat(step) is called periodically so a
     caller polling from another process can tell "slow but alive" from
@@ -119,7 +126,7 @@ def run_episode(
         obs, _, _, _ = env.step(DUMMY_ACTION)
 
     policy = RemotePolicy(port, task_str)
-    executor = DelayedChunkExecutor(policy, k=K, delay=delay)
+    executor = DelayedChunkExecutor(policy, k=K, delay=delay, stale_state=stale_state)
 
     for step in range(max_steps):
         arrays = libero_obs_to_arrays(obs)
@@ -199,7 +206,16 @@ def _write_results(out_path: pathlib.Path, suite_name: str, delay: int, results:
 
 
 def _run_task_worker(
-    bddl_path, task_str, init_states, start_ep, num_trials, delay, max_steps, port, result_queue
+    bddl_path,
+    task_str,
+    init_states,
+    start_ep,
+    num_trials,
+    delay,
+    max_steps,
+    port,
+    result_queue,
+    stale_state=False,
 ):
     """Runs episodes [start_ep, num_trials) for one LIBERO task.
 
@@ -245,7 +261,14 @@ def _run_task_worker(
                 result_queue.put(("heartbeat", _ep, step))
 
             ok = run_episode(
-                env, init_states[ep], task_str, delay, max_steps, port, heartbeat=_heartbeat
+                env,
+                init_states[ep],
+                task_str,
+                delay,
+                max_steps,
+                port,
+                heartbeat=_heartbeat,
+                stale_state=stale_state,
             )
             result_queue.put(("ep", ep, bool(ok)))
         result_queue.put(("done",))
@@ -275,6 +298,15 @@ def main():
     parser.add_argument("--out", required=True)
     parser.add_argument("--num-trials", type=int, default=NUM_TRIALS)
     parser.add_argument("--port", type=int, default=SERVER_PORT)
+    parser.add_argument(
+        "--stale-state",
+        action="store_true",
+        help=(
+            "Naive async: chunk-switch predict call conditions on the same "
+            "stale snapshot state as the stale images (fully stale obs), "
+            "instead of the true state at the chunk-start step."
+        ),
+    )
     args = parser.parse_args()
 
     # Parent process only needs LIBERO for suite/task metadata (task list,
@@ -329,6 +361,7 @@ def main():
                     max_steps,
                     args.port,
                     result_queue,
+                    args.stale_state,
                 ),
             )
             proc.start()

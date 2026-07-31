@@ -17,9 +17,14 @@ DELAYS=(0 1 3)
 SUITE=${SUITES[$((SLURM_ARRAY_TASK_ID / 3))]}
 DELAY=${DELAYS[$((SLURM_ARRAY_TASK_ID % 3))]}
 PORT=$((5901 + SLURM_ARRAY_TASK_ID))
-CKPT=/work/roboleon1295/vlash/outputs/train/async_libero/checkpoints/030000/pretrained_model
-OUT=/work/roboleon1295/vlash-eval/results
+CKPT=${CKPT:-/work/roboleon1295/vlash/outputs/train/async_libero/checkpoints/030000/pretrained_model}
+OUT=${OUT_DIR:-/work/roboleon1295/vlash-eval/results}
 mkdir -p $OUT
+
+STALE_STATE_ARGS=()
+if [ "${STALE_STATE:-0}" = "1" ]; then
+  STALE_STATE_ARGS+=(--stale-state)
+fi
 
 module purge; module load miniconda3/26.1.1
 source activate /work/roboleon1295/envs/vlash
@@ -38,7 +43,7 @@ done
 for attempt in 1 2 3 4 5; do
   MUJOCO_GL=egl /work/roboleon1295/.venv-libero-vanilla/bin/python \
     benchmarks/libero/eval_client.py --suite $SUITE --delay $DELAY --port $PORT \
-    --out $OUT/${SUITE}_d${DELAY}.json
+    --out $OUT/${SUITE}_d${DELAY}.json "${STALE_STATE_ARGS[@]}"
   RC=$?
   [ $RC -eq 0 ] && break
   echo "CLIENT CRASHED (rc=$RC), retry $attempt"
