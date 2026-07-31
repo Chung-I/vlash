@@ -1,6 +1,5 @@
 """use_state_ground_truth must flow from TrainConfig into both dataset classes."""
 import inspect
-from unittest.mock import patch
 
 from vlash.configs.train_config import VLASHTrainConfig
 import vlash.train as train_mod

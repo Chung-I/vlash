@@ -45,4 +45,4 @@ for attempt in 1 2 3 4 5; do
   sleep 10
 done
 kill $SERVER_PID
-[ $RC -ne 0 ] && exit 1
+if [ $RC -ne 0 ]; then exit 1; fi
