@@ -26,13 +26,18 @@ if [ "${STALE_STATE:-0}" = "1" ]; then
   STALE_STATE_ARGS+=(--stale-state)
 fi
 
+STATS_DATASET_ARGS=()
+if [ -n "${STATS_DATASET:-}" ]; then
+  STATS_DATASET_ARGS+=(--stats-dataset "$STATS_DATASET")
+fi
+
 module purge; module load miniconda3/26.1.1
 source activate /work/roboleon1295/envs/vlash
 export LD_LIBRARY_PATH=/work/roboleon1295/envs/vlash/lib:${LD_LIBRARY_PATH:-}
 export HOME=/work/roboleon1295/jobhome HF_HOME=/work/roboleon1295/.cache/huggingface
 cd /work/roboleon1295/vlash
 
-python benchmarks/libero/serve_policy.py --checkpoint $CKPT --port $PORT \
+python benchmarks/libero/serve_policy.py --checkpoint $CKPT --port $PORT "${STATS_DATASET_ARGS[@]}" \
   > /work/roboleon1295/vlash-eval/server-${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}.log 2>&1 &
 SERVER_PID=$!
 until curl -s http://127.0.0.1:$PORT/health | grep -q ok; do

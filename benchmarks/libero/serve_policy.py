@@ -29,6 +29,55 @@ def load_policy(checkpoint: str):
     return policy.to(policy.config.device).eval()
 
 
+def inject_dataset_stats(policy, repo_id: str | None = None, stats: dict | None = None) -> None:
+    """Populate normalization buffers from dataset stats when the checkpoint
+    ships none (new-pipeline checkpoints keep stats outside the weights;
+    e.g. lerobot/pi05_libero's model.safetensors has no normalization
+    buffers and its processor JSONs have empty `features`).
+
+    Refuses to overwrite finite (trained-in) buffers, so this is a no-op
+    (raises) if pointed at a checkpoint that already has real stats.
+
+    Args:
+        policy: A PI05Policy (or compatible) instance exposing
+            normalize_inputs / normalize_targets / unnormalize_outputs
+            submodules with buffer_observation_state / buffer_action
+            ParameterDicts (see vlash/policies/normalize.py).
+        repo_id: HF dataset repo id to load stats from via
+            `LeRobotDatasetMetadata(repo_id).stats`. Ignored if `stats` is
+            given directly.
+        stats: Pre-loaded stats dict, keyed by feature name
+            (e.g. "observation.state", "action") -> {"mean": ..., "std": ...}.
+            Passing this directly (bypassing `repo_id`) avoids network
+            access, which is what tests use.
+    """
+    if stats is None:
+        from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata
+
+        stats = LeRobotDatasetMetadata(repo_id).stats
+
+    targets = [
+        (policy.normalize_inputs.buffer_observation_state, "observation.state"),
+        (policy.normalize_targets.buffer_action, "action"),
+        (policy.unnormalize_outputs.buffer_action, "action"),
+    ]
+    for buffer, key in targets:
+        mean = buffer["mean"]
+        std = buffer["std"]
+        if torch.isfinite(mean).all():
+            raise RuntimeError(
+                f"normalization buffers for {key} are already populated; "
+                "refusing to overwrite a trained checkpoint's stats"
+            )
+        mean.data = torch.as_tensor(stats[key]["mean"], dtype=torch.float32, device=mean.device)
+        std.data = torch.as_tensor(stats[key]["std"], dtype=torch.float32, device=std.device)
+        logging.info(
+            "[inject_dataset_stats] populated buffers for %s: mean[:3]=%s",
+            key,
+            mean.detach().flatten()[:3].tolist(),
+        )
+
+
 def make_app(policy) -> Flask:
     app = Flask("vlash_libero_server")
     device = next(policy.parameters()).device
@@ -65,9 +114,20 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--port", type=int, default=SERVER_PORT)
+    parser.add_argument(
+        "--stats-dataset",
+        default=None,
+        help=(
+            "HF dataset repo id (e.g. HuggingFaceVLA/libero) to pull normalization "
+            "stats from when the checkpoint ships none. Default: don't inject."
+        ),
+    )
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
-    app = make_app(load_policy(args.checkpoint))
+    policy = load_policy(args.checkpoint)
+    if args.stats_dataset:
+        inject_dataset_stats(policy, repo_id=args.stats_dataset)
+    app = make_app(policy)
     app.run(host="127.0.0.1", port=args.port, threaded=False)
 
 
