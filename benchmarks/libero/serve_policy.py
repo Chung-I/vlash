@@ -71,10 +71,15 @@ def inject_dataset_stats(policy, repo_id: str | None = None, stats: dict | None 
             )
         mean.data = torch.as_tensor(stats[key]["mean"], dtype=torch.float32, device=mean.device)
         std.data = torch.as_tensor(stats[key]["std"], dtype=torch.float32, device=std.device)
-        logging.info(
-            "[inject_dataset_stats] populated buffers for %s: mean[:3]=%s",
-            key,
-            mean.detach().flatten()[:3].tolist(),
+        # NOTE: plain print(flush=True), not logging.info -- lerobot installs
+        # root logging handlers at import time, so a later
+        # logging.basicConfig(level=logging.INFO) in main() is a no-op and
+        # INFO records get silently dropped. print is the only reliable way
+        # to get this evidence line into the job log.
+        print(
+            f"[inject_dataset_stats] populated buffers for {key}: "
+            f"mean[:3]={mean.detach().flatten()[:3].tolist()}",
+            flush=True,
         )
 
 
