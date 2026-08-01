@@ -113,12 +113,19 @@ def run_episode(
     port: int,
     heartbeat=None,
     stale_state: bool = False,
+    log_actions: bool = False,
+    log_actions_n: int = 15,
 ) -> bool:
     """Run one episode. If given, heartbeat(step) is called periodically so a
     caller polling from another process can tell "slow but alive" from
     "actually dead" without waiting for the whole (potentially long) episode
     to finish -- libero_10 episodes take ~500+ steps and, at observed
     per-chunk server latency, can take on the order of 30+ minutes.
+
+    If log_actions is set, prints (flush=True) the first log_actions_n
+    full 7-dim action vectors actually sent to env.step -- debug aid for
+    diagnosing whether served actions are frozen/near-zero, wrongly scaled,
+    or sign-flipped relative to what the env expects.
     """
     env.reset()
     obs = env.set_init_state(init_state)
@@ -132,6 +139,8 @@ def run_episode(
         arrays = libero_obs_to_arrays(obs)
         images = {"image": arrays["image"], "wrist_image": arrays["wrist_image"]}
         action = executor.act(images, arrays["state"], task_str)
+        if log_actions and step < log_actions_n:
+            print(f"[log-actions] step {step}: action={action.tolist()}", flush=True)
         obs, _, done, _ = env.step(action.tolist())
         if heartbeat is not None and step % HEARTBEAT_EVERY_N_STEPS == 0:
             heartbeat(step)
@@ -216,6 +225,7 @@ def _run_task_worker(
     port,
     result_queue,
     stale_state=False,
+    log_actions=False,
 ):
     """Runs episodes [start_ep, num_trials) for one LIBERO task.
 
@@ -269,6 +279,7 @@ def _run_task_worker(
                 port,
                 heartbeat=_heartbeat,
                 stale_state=stale_state,
+                log_actions=log_actions,
             )
             result_queue.put(("ep", ep, bool(ok)))
         result_queue.put(("done",))
@@ -307,6 +318,21 @@ def main():
             "instead of the true state at the chunk-start step."
         ),
     )
+    parser.add_argument(
+        "--task-id",
+        type=int,
+        default=None,
+        help="Run only this task index (0-based) instead of the whole suite. Debug aid.",
+    )
+    parser.add_argument(
+        "--log-actions",
+        action="store_true",
+        help=(
+            "Print (flush=True) the first 15 full action vectors sent to "
+            "env.step per episode. Debug aid for diagnosing served-action "
+            "issues (frozen/scale/sign) against the live env."
+        ),
+    )
     args = parser.parse_args()
 
     # Parent process only needs LIBERO for suite/task metadata (task list,
@@ -321,7 +347,8 @@ def main():
     ctx = mp.get_context("spawn")
     shard_respawns = 0
 
-    for task_id in range(suite.n_tasks):
+    task_ids = [args.task_id] if args.task_id is not None else range(suite.n_tasks)
+    for task_id in task_ids:
         task = suite.get_task(task_id)
         task_str = task.language
         task_result = results.get(task.name)
@@ -362,6 +389,7 @@ def main():
                     args.port,
                     result_queue,
                     args.stale_state,
+                    args.log_actions,
                 ),
             )
             proc.start()
