@@ -1402,6 +1402,7 @@ class PI05Policy(PreTrainedPolicy):
         executed: int,
         prefix_attention_horizon: int | None = None,
         noise: Tensor | None = None,
+        max_guidance_weight: float = 5.0,
     ) -> tuple[Tensor, Tensor]:
         """RTC-guided chunk prediction (arXiv 2506.07339) for the serving path.
 
@@ -1444,6 +1445,7 @@ class PI05Policy(PreTrainedPolicy):
                 aligned.unsqueeze(0),
                 w,
                 noise=noise,
+                max_guidance_weight=max_guidance_weight,
             )
         original_action_dim = self.config.action_feature.shape[0]
         env_actions = model_chunk[:, :, :original_action_dim]

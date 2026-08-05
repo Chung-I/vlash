@@ -150,8 +150,14 @@ def make_app(policy) -> Flask:
             delay = int(data["rtc_delay"])
             executed = int(data["rtc_executed"])
             prev = rtc_prev.get(env_id)
+            import os
+
             env_chunk, model_chunk = policy.predict_action_chunk_rtc(
-                batch, prev, delay, executed
+                batch,
+                prev,
+                delay,
+                executed,
+                max_guidance_weight=float(os.environ.get("RTC_MAX_GUIDANCE", "5.0")),
             )
             rtc_prev[env_id] = model_chunk
             actions = env_chunk.detach().float().cpu().numpy()
