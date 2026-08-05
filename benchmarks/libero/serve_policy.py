@@ -83,6 +83,40 @@ def inject_dataset_stats(policy, repo_id: str | None = None, stats: dict | None 
         )
 
 
+def inject_openpi_quantile_stats(policy, norm_stats_json: str) -> None:
+    """Inject openpi's QUANTILE normalization as pseudo mean/std.
+
+    The released openpi pi05 checkpoints normalize state/actions with
+    quantiles: x_norm = 2*(x - q01)/(q99 - q01) - 1. The lerobot port declares
+    MEAN_STD mode, so setting mean := (q01+q99)/2 and std := (q99-q01)/2 makes
+    (x - mean)/std reproduce the quantile formula EXACTLY (and the inverse for
+    unnormalization). Injecting true dataset mean/std here (the previous fix)
+    mis-scales every state/action against quantile-trained weights -- measured
+    ~50% SR on libero_spatial vs ~98% with correct scaling.
+    """
+    import json
+
+    ns = json.load(open(norm_stats_json))["norm_stats"]
+
+    def pseudo(feat):
+        q01 = torch.tensor(ns[feat]["q01"], dtype=torch.float32)
+        q99 = torch.tensor(ns[feat]["q99"], dtype=torch.float32)
+        return (q01 + q99) / 2.0, (q99 - q01) / 2.0
+
+    targets = [
+        (policy.normalize_inputs.buffer_observation_state, "state"),
+        (policy.normalize_targets.buffer_action, "actions"),
+        (policy.unnormalize_outputs.buffer_action, "actions"),
+    ]
+    for buffer, feat in targets:
+        mean, std = pseudo(feat)
+        if torch.isfinite(buffer["mean"]).all():
+            raise RuntimeError("stats already populated; refusing to overwrite")
+        buffer["mean"].data = mean.to(buffer["mean"].device)
+        buffer["std"].data = std.to(buffer["std"].device)
+        print(f"[inject_openpi_quantile_stats] {feat}: mean[:3]={mean[:3].tolist()} std[:3]={std[:3].tolist()}", flush=True)
+
+
 def make_app(policy) -> Flask:
     app = Flask("vlash_libero_server")
     device = next(policy.parameters()).device
@@ -138,6 +172,15 @@ def main():
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--port", type=int, default=SERVER_PORT)
     parser.add_argument(
+        "--stats-openpi-json",
+        default=None,
+        help=(
+            "Path to an openpi norm_stats.json; injects quantile-parity pseudo "
+            "mean/std (exactly reproduces openpi quantile normalization). "
+            "Takes precedence over --stats-dataset."
+        ),
+    )
+    parser.add_argument(
         "--stats-dataset",
         default=None,
         help=(
@@ -148,7 +191,9 @@ def main():
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
     policy = load_policy(args.checkpoint)
-    if args.stats_dataset:
+    if args.stats_openpi_json:
+        inject_openpi_quantile_stats(policy, args.stats_openpi_json)
+    elif args.stats_dataset:
         inject_dataset_stats(policy, repo_id=args.stats_dataset)
     app = make_app(policy)
     app.run(host="127.0.0.1", port=args.port, threaded=False)
