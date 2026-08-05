@@ -263,7 +263,12 @@ def _run_task_worker(
     _orig_torch_load = torch.load
 
     def _load_full(*args, **kwargs):
-        kwargs.setdefault("weights_only", False)
+        # torch>=2.6 needs weights_only=False for LIBERO's init-state pickles;
+        # torch<1.13 doesn't know the kwarg at all
+        import inspect
+
+        if "weights_only" in inspect.signature(_orig_torch_load).parameters:
+            kwargs.setdefault("weights_only", False)
         return _orig_torch_load(*args, **kwargs)
 
     torch.load = _load_full
@@ -314,7 +319,12 @@ def main():
     _orig_torch_load = torch.load
 
     def _load_full(*args, **kwargs):
-        kwargs.setdefault("weights_only", False)
+        # torch>=2.6 needs weights_only=False for LIBERO's init-state pickles;
+        # torch<1.13 doesn't know the kwarg at all
+        import inspect
+
+        if "weights_only" in inspect.signature(_orig_torch_load).parameters:
+            kwargs.setdefault("weights_only", False)
         return _orig_torch_load(*args, **kwargs)
 
     # LIBERO's task init states are pickled package data (trusted, ships with
