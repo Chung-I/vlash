@@ -90,7 +90,7 @@ class RemotePolicy:
         self.url = f"http://127.0.0.1:{port}/predict"
         self.task = task
 
-    def __call__(self, images: dict, state, task: str, rtc: dict | None = None, full: bool = False):
+    def __call__(self, images: dict, state, task: str, rtc=None, full=False):
         buf = io.BytesIO()
         extra = {}
         if full:
