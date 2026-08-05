@@ -972,6 +972,16 @@ class PI05Model(nn.Module):
         x_t: torch.Tensor,
         timestep: torch.Tensor,
     ) -> torch.Tensor:
+        return self._denoise_step(prefix_pad_masks, prefix_att_masks, state, x_t, timestep)
+
+    def _denoise_step(
+        self,
+        prefix_pad_masks: torch.Tensor,
+        prefix_att_masks: torch.Tensor,
+        state: torch.Tensor,
+        x_t: torch.Tensor,
+        timestep: torch.Tensor,
+    ) -> torch.Tensor:
         """Single denoising step using cached prefix KV.
         
         This is called during inference ODE integration. Uses KV cache
@@ -1025,6 +1035,98 @@ class PI05Model(nn.Module):
         return self.action_out_proj(suffix_out)
 
     @torch.no_grad()
+    def _prefill_prefix(self, images, img_masks, tokens, masks):
+        """Compute and cache prefix KV; returns (prefix_pad_masks, prefix_att_masks)."""
+        prefix_embs, prefix_pad_masks, prefix_att_masks = self.prefix_embedder(
+            images, img_masks, tokens, masks
+        )
+        for layer in self.layers:
+            layer.self_attn.attn.reset_cache()
+        prefix_attention_mask, prefix_position_ids = build_attention_mask_and_position_ids(
+            prefix_pad_masks,
+            prefix_att_masks,
+            prefix_embs.dtype,
+        )
+        hidden_states_prefill = [prefix_embs, None]
+        conds_prefill = [None, None]
+        for layer in self.layers:
+            hidden_states_prefill = layer(
+                hidden_states_prefill,
+                prefix_attention_mask,
+                prefix_position_ids,
+                conds_prefill,
+                use_cache=True,
+            )
+        return prefix_pad_masks, prefix_att_masks
+
+    def sample_actions_rtc(
+        self,
+        images,
+        img_masks,
+        tokens,
+        masks,
+        state,
+        prev_actions: torch.Tensor,
+        prefix_weights: torch.Tensor,
+        noise=None,
+        num_steps=None,
+        max_guidance_weight: float = 5.0,
+    ) -> torch.Tensor:
+        """Real-Time Chunking (arXiv 2506.07339): guided inpainting against the previous chunk.
+
+        Independent torch port of the reference `realtime_action`
+        (real-time-chunking-kinetix/src/model.py), written for the CROSS-CHECK of the
+        openpi/JAX port (openpi pi0.py sample_actions_rtc) -- same math, different code.
+        This codebase integrates tau: 1=noise -> 0=target with dt<0 (same convention as
+        openpi, opposite of the reference), so the reference constants use t := 1 - tau
+        and the pinv correction is SUBTRACTED from v (dt<0 flips the step direction).
+
+        `prev_actions` [B, chunk_size, max_action_dim] must be NORMALIZED (model space)
+        and already aligned to this request's frame (index 0 = this request's obs time).
+        `prefix_weights` [chunk_size] is the soft mask (get_prefix_weights).
+        NOT decorated with no_grad: each step runs a vjp through the suffix pass.
+        Do not call under torch.inference_mode().
+        """
+        if num_steps is None:
+            num_steps = self.config.num_inference_steps
+        bsz = tokens.shape[0]
+        device = tokens.device
+        if noise is None:
+            noise = self.sample_noise((bsz, self.config.chunk_size, self.config.max_action_dim), device)
+
+        prefix_pad_masks, prefix_att_masks = self._prefill_prefix(images, img_masks, tokens, masks)
+
+        prev_actions = prev_actions.to(device=device, dtype=torch.float32)
+        w = prefix_weights.to(device=device, dtype=torch.float32)[None, :, None]
+
+        dt = -1.0 / num_steps
+        x_t = noise.to(torch.float32)
+        tau = 1.0
+        for _ in range(num_steps):
+            expanded_time = torch.full((bsz,), tau, dtype=torch.float32, device=device)
+            with torch.enable_grad():
+                x_in = x_t.detach().requires_grad_(True)
+                v_t = self._denoise_step(
+                    prefix_pad_masks, prefix_att_masks, state, x_in, expanded_time
+                ).to(torch.float32)
+                # one-step estimate of the target chunk under this convention
+                x0_hat = x_in - tau * v_t
+                error = ((prev_actions - x0_hat) * w).detach()
+                # vjp: correction = (d x0_hat / d x_in)^T @ error
+                correction = torch.autograd.grad((x0_hat * error).sum(), x_in)[0]
+            v_t = v_t.detach()
+            correction = correction.detach()
+            # reference constants with t := 1 - tau; c -> inf at tau=1 is clamped
+            t = 1.0 - tau
+            inv_r2 = (t**2 + (1.0 - t) ** 2) / max((1.0 - t) ** 2, 1e-12)
+            c = max_guidance_weight if t < 1e-9 else (1.0 - t) / t
+            guidance_weight = min(c * inv_r2, max_guidance_weight)
+            # dt < 0: subtract the correction so the step moves toward prev_actions
+            x_t = x_t + dt * (v_t - guidance_weight * correction)
+            tau = tau + dt
+        return x_t
+
+    @torch.no_grad()
     def sample_actions(self, images, img_masks, tokens, masks, state, noise=None, num_steps=None) -> torch.Tensor:
         """Sample actions from noise.
         
@@ -1055,33 +1157,7 @@ class PI05Model(nn.Module):
             )
             noise = self.sample_noise(actions_shape, device)
 
-        # Prefill: compute and cache prefix KV
-        prefix_embs, prefix_pad_masks, prefix_att_masks = self.prefix_embedder(
-            images, img_masks, tokens, masks
-        )
-        
-        # Reset KV cache
-        for layer in self.layers:
-            layer.self_attn.attn.reset_cache()
-
-        prefix_attention_mask, prefix_position_ids = build_attention_mask_and_position_ids(
-            prefix_pad_masks,
-            prefix_att_masks,
-            prefix_embs.dtype,
-        )
-
-        # Prefill forward pass (caches KV)
-        hidden_states_prefill = [prefix_embs, None]
-        conds_prefill = [None, None]
-
-        for layer in self.layers:
-            hidden_states_prefill = layer(
-                hidden_states_prefill,
-                prefix_attention_mask,
-                prefix_position_ids,
-                conds_prefill,
-                use_cache=True,
-            )
+        prefix_pad_masks, prefix_att_masks = self._prefill_prefix(images, img_masks, tokens, masks)
 
         dt = -1.0 / num_steps
         dt = torch.tensor(dt, dtype=torch.float32, device=device)
@@ -1317,6 +1393,62 @@ class PI05Policy(PreTrainedPolicy):
         actions = self.unnormalize_outputs({"action": actions})["action"]
 
         return actions[:, : self.config.n_action_steps, :]
+
+    def predict_action_chunk_rtc(
+        self,
+        batch: dict[str, Tensor],
+        prev_model_chunk: Tensor | None,
+        inference_delay: int,
+        executed: int,
+        prefix_attention_horizon: int | None = None,
+        noise: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor]:
+        """RTC-guided chunk prediction (arXiv 2506.07339) for the serving path.
+
+        prev_model_chunk: previous chunk in MODEL space [chunk_size, max_action_dim]
+        (as returned by this function), or None for the first request (falls back to
+        plain sampling). Alignment: index 0 of the previous chunk corresponds to the
+        previous request's obs time; this request is `executed` steps later, so the
+        previous chunk is shifted by `executed` and edge-padded.
+
+        Returns (env_actions [chunk_size, action_dim], model_chunk [chunk_size, max_action_dim]).
+        Do not call under torch.inference_mode() (the guided sampler runs a vjp).
+        """
+        from vlash.policies.pi05.utils import rtc_prefix_weights
+
+        batch = self.normalize_inputs(batch)
+        images, img_masks = self.prepare_images(batch)
+        state = self.prepare_state(batch)
+        lang_tokens, lang_masks = self.prepare_language(batch, pad_to_max_length=False)
+
+        H = self.config.chunk_size
+        if prev_model_chunk is None:
+            with torch.no_grad():
+                model_chunk = self.model.sample_actions(
+                    images, img_masks, lang_tokens, lang_masks, state, noise=noise
+                )
+        else:
+            prev = prev_model_chunk.to(torch.float32)
+            shift = int(executed)
+            aligned = torch.cat([prev[shift:], prev[-1:].expand(shift, -1)], dim=0)
+            pah = prefix_attention_horizon if prefix_attention_horizon is not None else H - shift
+            w = torch.from_numpy(
+                rtc_prefix_weights(int(inference_delay), int(pah), H)
+            ).to(torch.float32)
+            model_chunk = self.model.sample_actions_rtc(
+                images,
+                img_masks,
+                lang_tokens,
+                lang_masks,
+                state,
+                aligned.unsqueeze(0),
+                w,
+                noise=noise,
+            )
+        original_action_dim = self.config.action_feature.shape[0]
+        env_actions = model_chunk[:, :, :original_action_dim]
+        env_actions = self.unnormalize_outputs({"action": env_actions})["action"]
+        return env_actions[0], model_chunk[0].detach().to("cpu", torch.float32)
 
     @torch.no_grad()
     def select_action(self, batch: dict[str, Tensor], noise: Tensor | None = None) -> Tensor:

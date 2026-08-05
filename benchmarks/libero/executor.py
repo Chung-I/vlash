@@ -51,3 +51,53 @@ class DelayedChunkExecutor:
         action = self.chunk[self.idx]
         self.idx += 1
         return action
+
+
+class OverlapChunkExecutor:
+    """openpi-cell delay protocol (kinetix eval convention), added for the RTC
+    cross-check: request with the CURRENT observation; the new chunk takes
+    effect `delay` steps later, so each cycle executes prev_full[k:k+delay]
+    (the in-flight overlap) then new[delay:k]. The rtc arm additionally passes
+    rtc metadata so the SERVER runs guided inpainting against its cached
+    previous chunk (arXiv 2506.07339).
+
+    Differs from DelayedChunkExecutor above (VLASH's native convention:
+    stale snapshot at idx==k-delay, full-chunk swap at the boundary): here the
+    obs is fresh at request time and the delay is paid in execution overlap.
+    Matches openpi examples/libero/main_delay.py so d means the same thing in
+    both stacks.
+    """
+
+    def __init__(self, predict_fn, k: int, delay: int, arm: str, env_id: int):
+        assert arm in ("sync", "naive", "rtc"), arm
+        if arm == "sync":
+            assert delay == 0, "sync arm is delay-0 by definition"
+        assert 0 <= delay <= k, "delay must fit in the execute window"
+        self.predict_fn = predict_fn
+        self.k = k
+        self.delay = delay
+        self.arm = arm
+        self.env_id = env_id
+        self.prev_full = None
+        self.buffer = []
+
+    def act(self, images: dict, state, task: str):
+        if not self.buffer:
+            rtc = None
+            if self.arm == "rtc":
+                rtc = {"env_id": self.env_id, "delay": self.delay, "executed": self.k}
+            full = self.predict_fn(images, state, task, rtc=rtc, full=True)
+            assert len(full) >= self.k + self.delay, (
+                f"chunk horizon {len(full)} too short for k={self.k} d={self.delay}"
+            )
+            if self.prev_full is None or self.delay == 0:
+                committed = full[: self.k]
+            else:
+                import numpy as _np
+
+                committed = _np.concatenate(
+                    [self.prev_full[self.k : self.k + self.delay], full[self.delay : self.k]]
+                )
+            self.prev_full = full
+            self.buffer = list(committed)
+        return self.buffer.pop(0)

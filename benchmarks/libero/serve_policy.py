@@ -86,6 +86,10 @@ def inject_dataset_stats(policy, repo_id: str | None = None, stats: dict | None 
 def make_app(policy) -> Flask:
     app = Flask("vlash_libero_server")
     device = next(policy.parameters()).device
+    # RTC (arXiv 2506.07339) serving support: per-env cache of the previous
+    # chunk in MODEL (normalized) space. Keyed by client-provided env_id; the
+    # client uses a fresh env_id per episode so the cache is episode-local.
+    rtc_prev: dict[int, torch.Tensor] = {}
 
     @app.route("/health")
     def health():
@@ -105,9 +109,23 @@ def make_app(policy) -> Flask:
             .to(device)
         )
         batch["task"] = [str(data["task"])]
-        with torch.inference_mode():
-            chunk = policy.predict_action_chunk(batch)
-        actions = chunk[0, :K].float().cpu().numpy()
+        if "rtc" in data.files and int(data["rtc"]):
+            # guided sampling runs a vjp per step -> must NOT be under
+            # torch.inference_mode (inference tensors cannot enter autograd)
+            env_id = int(data["rtc_env_id"])
+            delay = int(data["rtc_delay"])
+            executed = int(data["rtc_executed"])
+            prev = rtc_prev.get(env_id)
+            env_chunk, model_chunk = policy.predict_action_chunk_rtc(
+                batch, prev, delay, executed
+            )
+            rtc_prev[env_id] = model_chunk
+            actions = env_chunk.detach().float().cpu().numpy()
+        else:
+            with torch.inference_mode():
+                chunk = policy.predict_action_chunk(batch)
+            take = chunk.shape[1] if "full" in data.files else K
+            actions = chunk[0, :take].float().cpu().numpy()
         buf = io.BytesIO()
         np.savez(buf, actions=actions)
         return buf.getvalue()

@@ -360,3 +360,28 @@ def build_shared_obs_attention_mask_and_position_ids(
     attention_mask = attention_mask.unsqueeze(1)
     
     return attention_mask, position_ids
+
+
+def rtc_prefix_weights(start: int, end: int, total: int, schedule: str = "exp"):
+    """Numpy port of get_prefix_weights (real-time-chunking-kinetix/src/model.py:40).
+
+    start=inference_delay (frozen region, weight 1), end=prefix_attention_horizon
+    (weights 0 from here on), exponential decay in between. Kept in numpy so the
+    server can compute it host-side; independent transliteration for the RTC
+    cross-check (mirrors openpi policy._rtc_prefix_weights).
+    """
+    import numpy as np
+
+    start = min(start, end)
+    idx = np.arange(total, dtype=np.float64)
+    if schedule == "ones":
+        w = np.ones(total)
+    elif schedule == "zeros":
+        w = (idx < start).astype(np.float64)
+    elif schedule in ("linear", "exp"):
+        w = np.clip((start - 1 - idx) / (end - start + 1) + 1, 0, 1)
+        if schedule == "exp":
+            w = w * np.expm1(w) / (np.e - 1)
+    else:
+        raise ValueError(f"Invalid schedule: {schedule}")
+    return np.where(idx >= end, 0.0, w)

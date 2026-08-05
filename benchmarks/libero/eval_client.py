@@ -30,7 +30,7 @@ import numpy as np
 import requests
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
-from executor import DelayedChunkExecutor  # noqa: E402
+from executor import DelayedChunkExecutor, OverlapChunkExecutor  # noqa: E402
 from libero_config import (  # noqa: E402
     DUMMY_ACTION,
     K,
@@ -90,16 +90,25 @@ class RemotePolicy:
         self.url = f"http://127.0.0.1:{port}/predict"
         self.task = task
 
-    def __call__(self, images: dict, state, task: str):
+    def __call__(self, images: dict, state, task: str, rtc: dict | None = None, full: bool = False):
         buf = io.BytesIO()
+        extra = {}
+        if full:
+            extra["full"] = np.array(1)
+        if rtc is not None:
+            extra["rtc"] = np.array(1)
+            extra["rtc_env_id"] = np.array(int(rtc["env_id"]))
+            extra["rtc_delay"] = np.array(int(rtc["delay"]))
+            extra["rtc_executed"] = np.array(int(rtc["executed"]))
         np.savez(
             buf,
             image=images["image"],
             wrist_image=images["wrist_image"],
             state=np.asarray(state, dtype=np.float32),
             task=np.array(task),
+            **extra,
         )
-        resp = requests.post(self.url, data=buf.getvalue(), timeout=120)
+        resp = requests.post(self.url, data=buf.getvalue(), timeout=300)
         resp.raise_for_status()
         return np.load(io.BytesIO(resp.content))["actions"]
 
@@ -115,6 +124,8 @@ def run_episode(
     stale_state: bool = False,
     log_actions: bool = False,
     log_actions_n: int = 15,
+    arm: str = "legacy",
+    env_id: int = 0,
 ) -> bool:
     """Run one episode. If given, heartbeat(step) is called periodically so a
     caller polling from another process can tell "slow but alive" from
@@ -133,7 +144,10 @@ def run_episode(
         obs, _, _, _ = env.step(DUMMY_ACTION)
 
     policy = RemotePolicy(port, task_str)
-    executor = DelayedChunkExecutor(policy, k=K, delay=delay, stale_state=stale_state)
+    if arm == "legacy":
+        executor = DelayedChunkExecutor(policy, k=K, delay=delay, stale_state=stale_state)
+    else:
+        executor = OverlapChunkExecutor(policy, k=K, delay=delay, arm=arm, env_id=env_id)
 
     for step in range(max_steps):
         arrays = libero_obs_to_arrays(obs)
@@ -226,6 +240,8 @@ def _run_task_worker(
     result_queue,
     stale_state=False,
     log_actions=False,
+    arm="legacy",
+    task_index=0,
 ):
     """Runs episodes [start_ep, num_trials) for one LIBERO task.
 
@@ -280,6 +296,8 @@ def _run_task_worker(
                 heartbeat=_heartbeat,
                 stale_state=stale_state,
                 log_actions=log_actions,
+                arm=arm,
+                env_id=task_index * 10000 + ep,  # fresh server-side rtc cache per episode
             )
             result_queue.put(("ep", ep, bool(ok)))
         result_queue.put(("done",))
@@ -309,6 +327,17 @@ def main():
     parser.add_argument("--out", required=True)
     parser.add_argument("--num-trials", type=int, default=NUM_TRIALS)
     parser.add_argument("--port", type=int, default=SERVER_PORT)
+    parser.add_argument(
+        "--arm",
+        default="legacy",
+        choices=["legacy", "sync", "naive", "rtc"],
+        help=(
+            "legacy: original VLASH-convention executor (stale snapshot at "
+            "idx==k-delay, controlled by --stale-state). sync/naive/rtc: "
+            "openpi-cell overlap protocol (OverlapChunkExecutor) for the RTC "
+            "cross-check; rtc adds server-side guided inpainting."
+        ),
+    )
     parser.add_argument(
         "--stale-state",
         action="store_true",
@@ -390,6 +419,8 @@ def main():
                     result_queue,
                     args.stale_state,
                     args.log_actions,
+                    args.arm,
+                    task_id,
                 ),
             )
             proc.start()
