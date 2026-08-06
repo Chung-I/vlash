@@ -1403,6 +1403,7 @@ class PI05Policy(PreTrainedPolicy):
         prefix_attention_horizon: int | None = None,
         noise: Tensor | None = None,
         max_guidance_weight: float = 5.0,
+        chunk_trunc: int | None = None,
     ) -> tuple[Tensor, Tensor]:
         """RTC-guided chunk prediction (arXiv 2506.07339) for the serving path.
 
@@ -1423,19 +1424,31 @@ class PI05Policy(PreTrainedPolicy):
         lang_tokens, lang_masks = self.prepare_language(batch, pad_to_max_length=False)
 
         H = self.config.chunk_size
+        # chunk_trunc: treat the effective horizon as the first `chunk_trunc`
+        # actions (cache + guidance target + weights), matching a stack whose
+        # native horizon is shorter (e.g. openpi pi05_libero H=10 vs this
+        # port's chunk_size=50). Sampling still generates the full chunk;
+        # weights are zero beyond the truncated window.
+        H_eff = int(chunk_trunc) if chunk_trunc else H
         if prev_model_chunk is None:
             with torch.no_grad():
                 model_chunk = self.model.sample_actions(
                     images, img_masks, lang_tokens, lang_masks, state, noise=noise
                 )
         else:
-            prev = prev_model_chunk.to(torch.float32)
+            prev = prev_model_chunk.to(torch.float32)[:H_eff]
             shift = int(executed)
             aligned = torch.cat([prev[shift:], prev[-1:].expand(shift, -1)], dim=0)
-            pah = prefix_attention_horizon if prefix_attention_horizon is not None else H - shift
-            w = torch.from_numpy(
-                rtc_prefix_weights(int(inference_delay), int(pah), H)
-            ).to(torch.float32)
+            pah = prefix_attention_horizon if prefix_attention_horizon is not None else H_eff - shift
+            w_eff = rtc_prefix_weights(int(inference_delay), int(pah), H_eff)
+            if H_eff < H:
+                # pad guidance target/weights to the full sampled horizon;
+                # weights are zero there so the padded content is inert
+                aligned = torch.cat([aligned, aligned[-1:].expand(H - H_eff, -1)], dim=0)
+                import numpy as _np
+
+                w_eff = _np.concatenate([w_eff, _np.zeros(H - H_eff)])
+            w = torch.from_numpy(w_eff).to(torch.float32)
             model_chunk = self.model.sample_actions_rtc(
                 images,
                 img_masks,
@@ -1450,7 +1463,7 @@ class PI05Policy(PreTrainedPolicy):
         original_action_dim = self.config.action_feature.shape[0]
         env_actions = model_chunk[:, :, :original_action_dim]
         env_actions = self.unnormalize_outputs({"action": env_actions})["action"]
-        return env_actions[0], model_chunk[0].detach().to("cpu", torch.float32)
+        return env_actions[0], model_chunk[0, :H_eff].detach().to("cpu", torch.float32)
 
     @torch.no_grad()
     def select_action(self, batch: dict[str, Tensor], noise: Tensor | None = None) -> Tensor:

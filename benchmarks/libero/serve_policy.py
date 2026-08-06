@@ -158,6 +158,7 @@ def make_app(policy) -> Flask:
                 delay,
                 executed,
                 max_guidance_weight=float(os.environ.get("RTC_MAX_GUIDANCE", "5.0")),
+                chunk_trunc=int(os.environ.get("RTC_CHUNK_TRUNC", "0")) or None,
             )
             rtc_prev[env_id] = model_chunk
             actions = env_chunk.detach().float().cpu().numpy()
